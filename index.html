@@ -20,7 +20,9 @@ select,input,button{background:#141a24;color:var(--text);border:1px solid var(--
 button{cursor:pointer}
 button.on{border-color:var(--accent);color:var(--accent)}
 .grp{display:flex;gap:4px;align-items:center}
-.px{font-size:15px;font-weight:700;font-variant-numeric:tabular-nums;margin-left:auto}
+.bias{border-radius:6px;padding:3px 8px;font-weight:700;background:#141a24;border:1px solid var(--line);color:var(--muted);margin-left:auto;font-variant-numeric:tabular-nums}
+.bias.up{color:#06130d;background:var(--buy);border-color:var(--buy)}.bias.dn{color:#fff;background:var(--sell);border-color:var(--sell)}.bias.flat{color:var(--text)}
+.px{font-size:15px;font-weight:700;font-variant-numeric:tabular-nums}
 .stat{color:var(--muted);font-variant-numeric:tabular-nums}
 .dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:#555;margin-right:4px;vertical-align:middle}
 .dot.ok{background:var(--buy)}.dot.bad{background:var(--sell)}.dot.wait{background:var(--accent)}
@@ -62,6 +64,7 @@ details.more>summary::-webkit-details-marker{display:none}
     <button id="bLiq" class="on" title="實際清算">清算</button>
     <button id="bMap" class="on" title="估算清算地圖">清算地圖</button>
     <button id="bIct" class="on" title="ICT 結構：Swing 流動性、等高等低、FVG、掃單收回（只做標示，不是買賣訊號）">ICT</button>
+    <button id="bEma" class="on" title="4H EMA21／55／100 與 4H 方向（只用已收盤的 4H K）">EMA</button>
   </div>
   <details class="more"><summary>設定</summary>
     <div class="menu">
@@ -72,6 +75,7 @@ details.more>summary::-webkit-details-marker{display:none}
       <div class="stat">操作：拖曳平移；滾輪/雙指縮放時間；在右側價格軸拖曳或 Shift+滾輪縮放價格；雙擊回到即時。</div>
     </div>
   </details>
+  <span class="bias" id="bias" title="4H 方向：收盤 > EMA100 且 EMA21 > EMA55 為多；鏡像為空；其餘中性。只用已收盤的 4H K，不重繪">4H 方向 —</span>
   <span class="px" id="px">—</span>
 </header>
 <div id="stage">
@@ -84,7 +88,7 @@ details.more>summary::-webkit-details-marker{display:none}
   <span><span class="dot" id="dot"></span><span id="conn">連線中</span></span>
   <span id="clock" class="stat"></span>
   <span id="info" class="stat"></span>
-  <span class="hide-s">ICT 標記只做位置參考、不是買賣訊號；清算地圖為模型估算（依成交量×槓桿分布推算），不是交易所真實數據</span>
+  <span class="hide-s">ICT 與 4H EMA 方向只做參考、不是買賣訊號；清算地圖為模型估算（依成交量×槓桿分布推算），不是交易所真實數據</span>
 </footer>
 </div>
 <script>
@@ -110,7 +114,7 @@ function decimals(step){ const s = String(step); return s.includes('.') ? s.spli
 /* ---------- 狀態 ---------- */
 const S = {
   ex:'binance', sym:'BTC', tf:300000, tick:10, contrast:1, bubMin:20000, mapGain:1,
-  show:{heat:true, fp:true, bub:true, liq:true, map:true, ict:true},
+  show:{heat:true, fp:true, bub:true, liq:true, map:true, ict:true, ema:true},
   bids:new Map(), asks:new Map(), bookReady:false,
   cols:[],          // 熱圖快照：{t, base, arr:Float32Array}
   candles:[],       // {t,o,h,l,c,vb,vs,fp:Map(idx->[sell,buy]), live}
@@ -136,7 +140,7 @@ function resetData(){
   S.bids.clear(); S.asks.clear(); S.bookReady = false;
   S.cols = []; S.candles = []; S.bubbles = []; S.liqs = [];
   S.lmapL.clear(); S.lmapS.clear(); S.last = null;
-  S.far = null; clearTimeout(S.farTimer);
+  S.far = null; clearTimeout(S.farTimer); S.h4 = null;
   $('liqlist').innerHTML = '';
 }
 
@@ -148,6 +152,7 @@ async function start(){
   status('wait', '載入歷史 K 線…');
   try {
     if (S.ex === 'binance') await startBinance(gen); else await startOkx(gen);
+    load4h(gen);
   } catch (e) {
     if (gen !== S.gen) return;
     status('bad', '連線失敗：' + e.message + '（10 秒後重試）');
@@ -557,6 +562,7 @@ function computeIct(){
 function drawIct(){
   if (!S.show.ict || !S.candles.length) return;
   const {cs, levels, eqs, fvgs, sweeps} = computeIct();
+  const roomy = (S.tf / V.msPerPx) >= 7; // K 線太窄時不畫文字，避免擠成一團
   const xOf = i => tX(cs[i].t + S.tf / 2), xEnd = j => j === null ? plot.w : tX(cs[j].t + S.tf / 2);
   // FVG：只畫未回補的，回補的淡淡畫到回補那根
   for (const g of fvgs) {
@@ -581,7 +587,7 @@ function drawIct(){
     ctx.setLineDash(lv.end === null ? [] : [2, 3]);
     ctx.strokeStyle = lv.end === null ? (lv.side === 'H' ? 'rgba(255,170,90,.75)' : 'rgba(120,200,255,.75)') : 'rgba(200,200,200,.3)';
     ctx.beginPath(); ctx.moveTo(x0, y); ctx.lineTo(x1, y); ctx.stroke();
-    if (lv.end === null) {
+    if (lv.end === null && roomy) {
       ctx.fillStyle = lv.side === 'H' ? 'rgba(255,170,90,.9)' : 'rgba(120,200,255,.9)';
       ctx.font = '10px sans-serif'; ctx.textAlign = 'left'; ctx.textBaseline = lv.side === 'H' ? 'bottom' : 'top';
       ctx.fillText(lv.side === 'H' ? '買方停損 / 高點流動性' : '賣方停損 / 低點流動性', x0 + 4, lv.side === 'H' ? y - 1 : y + 1);
@@ -607,7 +613,74 @@ function drawIct(){
     else { ctx.moveTo(x, y); ctx.lineTo(x - 5, y - 8); ctx.lineTo(x + 5, y - 8); }
     ctx.fill();
     ctx.font = '10px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = up ? 'top' : 'bottom';
-    ctx.fillText(up ? '掃低收回' : '掃高收回', x, up ? y + 10 : y - 10);
+    if (roomy) ctx.fillText(up ? '掃低收回' : '掃高收回', x, up ? y + 10 : y - 10);
+  }
+}
+
+/* ---------- 4H EMA 方向（同 MTF v1.0 的 4H 方向定義；R6.1 閘門＝收盤相對 EMA100） ----------
+   多：4H 收盤 > EMA100 且 EMA21 > EMA55；空：鏡像；其餘中性。只用已收盤 4H K，每 5 分鐘更新。 */
+const H4 = 4 * 3600e3;
+let h4Timer = null;
+async function load4h(gen){
+  clearTimeout(h4Timer);
+  try {
+    let rows;
+    if (S.ex === 'binance') {
+      const sym = S.sym + 'USDT';
+      try { rows = await getJSON(`https://fapi.binance.com/fapi/v1/klines?symbol=${sym}&interval=4h&limit=600`); }
+      catch (e) { rows = await wsRpc('wss://ws-api.binance.com:443/ws-api/v3', 'klines', {symbol:sym, interval:'4h', limit:600}); }
+      rows = rows.map(k => [+k[0], +k[4]]);
+    } else {
+      const r = await getJSON(`https://www.okx.com/api/v5/market/candles?instId=${S.sym}-USDT-SWAP&bar=4H&limit=300`);
+      rows = r.data.slice().reverse().map(k => [+k[0], +k[4]]);
+      for (let p = 0; p < 3 && rows.length; p++) {   // 往前補到約 600 根，讓 EMA100 收斂
+        const h = await getJSON(`https://www.okx.com/api/v5/market/history-candles?instId=${S.sym}-USDT-SWAP&bar=4H&limit=100&after=${rows[0][0]}`);
+        if (!h.data.length) break;
+        rows = h.data.slice().reverse().map(k => [+k[0], +k[4]]).concat(rows);
+      }
+    }
+    if (gen !== S.gen) return;
+    const now = Date.now(); const cl = rows.filter(r => r[0] + H4 <= now);
+    const ema = n => { const k = 2 / (n + 1); let e = null; return cl.map(r => (e = e === null ? r[1] : e + k * (r[1] - e))); };
+    const e21 = ema(21), e55 = ema(55), e100 = ema(100);
+    const bias = cl.map((r, i) => r[1] > e100[i] && e21[i] > e55[i] ? 1 : r[1] < e100[i] && e21[i] < e55[i] ? -1 : 0);
+    S.h4 = {t: cl.map(r => r[0]), c: cl.map(r => r[1]), e21, e55, e100, bias, warm: cl.length};
+    const i = cl.length - 1, b = bias[i], el = $('bias');
+    const dec = decimals(S.tick) + 1;
+    el.className = 'bias ' + (b === 1 ? 'up' : b === -1 ? 'dn' : 'flat');
+    el.textContent = `4H ${b === 1 ? '多' : b === -1 ? '空' : '中性'}`;
+    el.title = `4H 方向（最後收盤 ${fmtTime(cl[i][0] + H4)} 台北）\n收盤 ${cl[i][1].toFixed(dec)}\nEMA21 ${e21[i].toFixed(dec)}　EMA55 ${e55[i].toFixed(dec)}　EMA100 ${e100[i].toFixed(dec)}\n收盤 ${cl[i][1] > e100[i] ? '>' : '<'} EMA100、EMA21 ${e21[i] > e55[i] ? '>' : '<'} EMA55\n多：收盤>EMA100 且 EMA21>EMA55；空：鏡像；其餘中性\n資料 ${cl.length} 根 4H K${cl.length < 300 ? '（不足 300 根，EMA100 可能還沒完全收斂）' : ''}`;
+  } catch (e) {
+    if (gen !== S.gen) return;
+    S.h4 = null; $('bias').className = 'bias'; $('bias').textContent = '4H 方向 讀取失敗';
+  }
+  h4Timer = setTimeout(() => gen === S.gen && load4h(gen), 5 * 60e3);
+}
+function drawEma(){
+  const d = S.h4; if (!S.show.ema || !d || !d.t.length) return;
+  const n = d.t.length;
+  // 頂部方向條：每根 4H K 收盤後才生效，延續到下一根收盤
+  for (let i = 0; i < n; i++) {
+    const x0 = tX(d.t[i] + H4), x1 = i + 1 < n ? tX(d.t[i + 1] + H4) : plot.w;
+    if (x1 < 0 || x0 > plot.w) continue;
+    ctx.fillStyle = d.bias[i] === 1 ? 'rgba(34,197,139,.85)' : d.bias[i] === -1 ? 'rgba(239,77,90,.85)' : 'rgba(123,134,153,.5)';
+    ctx.fillRect(x0, 0, x1 - x0, 4);
+  }
+  const lines = [['e21', 'rgba(245,215,110,.9)', 1.2, 'EMA21'], ['e55', 'rgba(255,150,60,.9)', 1.2, 'EMA55'], ['e100', 'rgba(190,130,255,.95)', 2, 'EMA100']];
+  for (const [k, col, lw, name] of lines) {
+    ctx.strokeStyle = col; ctx.lineWidth = lw; ctx.beginPath(); let started = false;
+    for (let i = 0; i < n; i++) {
+      const x0 = tX(d.t[i] + H4), x1 = i + 1 < n ? tX(d.t[i + 1] + H4) : plot.w, y = pY(d[k][i]);
+      if (x1 < 0 || x0 > plot.w) continue;
+      if (!started) { ctx.moveTo(Math.max(x0, 0), y); started = true; } else ctx.lineTo(x0, y);
+      ctx.lineTo(x1, y);
+    }
+    ctx.stroke();
+    const y = pY(d[k][n - 1]);
+    if (y > 8 && y < plot.h - 4) {
+      ctx.fillStyle = col; ctx.font = '10px sans-serif'; ctx.textAlign = 'right'; ctx.textBaseline = 'bottom';
+      ctx.fillText('4H ' + name, plot.w - 4, y - 2);
+    }
   }
 }
 
@@ -748,12 +821,13 @@ function drawAxes(){
   }
   // 時間軸
   ctx.fillStyle = '#0d1118'; ctx.fillRect(0, plot.h, plot.w + PROF, TAXIS);
-  const tstep = [1,5,15,30,60,300,900,1800,3600,7200,14400].map(s => s * 1000).find(s => s / V.msPerPx >= 80) || 14400000;
+  const tstep = [1,5,15,30,60,300,900,1800,3600,7200,14400,43200,86400,172800,604800].map(s => s * 1000).find(s => s / V.msPerPx >= 80) || 604800000;
+  const tzOff = 8 * 3600e3; // 以台北時間對齊日線刻度
   ctx.textAlign = 'center'; ctx.fillStyle = '#7b8699';
-  for (let t = Math.ceil(xT(0) / tstep) * tstep; t <= xT(plot.w); t += tstep) {
+  for (let t = Math.ceil((xT(0) + tzOff) / tstep) * tstep - tzOff; t <= xT(plot.w); t += tstep) {
     const x = Math.round(tX(t)) + .5;
     ctx.strokeStyle = 'rgba(255,255,255,.05)'; ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, plot.h); ctx.stroke();
-    ctx.fillText(fmtTime(t, tstep < 60000), x, plot.h + TAXIS / 2);
+    ctx.fillText(tstep >= 86400000 ? new Date(t).toLocaleDateString('zh-TW', {timeZone:TZ, month:'2-digit', day:'2-digit'}) : fmtTime(t, tstep < 60000), x, plot.h + TAXIS / 2);
   }
 }
 
@@ -792,7 +866,7 @@ function render(){
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.fillStyle = '#07090d'; ctx.fillRect(0, 0, W, H);
   ctx.save(); ctx.beginPath(); ctx.rect(0, 0, plot.w, plot.h); ctx.clip();
-  drawHeat(); drawLiqMap(); drawIct(); drawCandles(); drawBubbles(); drawLiqs();
+  drawHeat(); drawLiqMap(); drawIct(); drawEma(); drawCandles(); drawBubbles(); drawLiqs();
   ctx.restore();
   ctx.save(); ctx.beginPath(); ctx.rect(0, 0, plot.w + PROF, plot.h); ctx.clip();
   drawProfile(); drawPriceLine();
@@ -887,7 +961,7 @@ function hover(x, y){
 }
 
 /* ---------- 控制項 ---------- */
-const toggles = {bHeat:'heat', bFp:'fp', bBub:'bub', bLiq:'liq', bMap:'map', bIct:'ict'};
+const toggles = {bHeat:'heat', bFp:'fp', bBub:'bub', bLiq:'liq', bMap:'map', bIct:'ict', bEma:'ema'};
 for (const [id, key] of Object.entries(toggles)) $(id).onclick = () => { S.show[key] = !S.show[key]; $(id).classList.toggle('on', S.show[key]); savePrefs(); };
 $('ex').onchange = e => { S.ex = e.target.value; savePrefs(); start(); };
 $('sym').onchange = e => { S.sym = e.target.value; savePrefs(); start(); };
