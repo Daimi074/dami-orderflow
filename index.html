@@ -1,0 +1,805 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="theme-color" content="#07090d">
+<title>Dami 訂單流</title>
+<style>
+:root{
+  --bg:#07090d;--panel:#0d1118;--line:#1c2330;--text:#d7dde8;--muted:#7b8699;
+  --buy:#22c58b;--sell:#ef4d5a;--liqL:#ff3db8;--liqS:#3dd8ff;--accent:#f5b83d;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--text);font:12px/1.35 -apple-system,"Segoe UI","Noto Sans TC",sans-serif;overflow:hidden;-webkit-tap-highlight-color:transparent}
+#app{display:flex;flex-direction:column;height:100%;padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)}
+header{display:flex;flex-wrap:wrap;gap:6px;align-items:center;padding:6px 8px;border-bottom:1px solid var(--line);background:var(--panel)}
+.brand{font-weight:700;letter-spacing:.5px;margin-right:4px}
+.brand small{color:var(--muted);font-weight:400;margin-left:4px}
+select,input,button{background:#141a24;color:var(--text);border:1px solid var(--line);border-radius:6px;padding:4px 6px;font:inherit}
+button{cursor:pointer}
+button.on{border-color:var(--accent);color:var(--accent)}
+.grp{display:flex;gap:4px;align-items:center}
+.px{font-size:15px;font-weight:700;font-variant-numeric:tabular-nums;margin-left:auto}
+.stat{color:var(--muted);font-variant-numeric:tabular-nums}
+.dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:#555;margin-right:4px;vertical-align:middle}
+.dot.ok{background:var(--buy)}.dot.bad{background:var(--sell)}.dot.wait{background:var(--accent)}
+#stage{position:relative;flex:1;min-height:0}
+canvas{position:absolute;left:0;top:0;touch-action:none;display:block}
+#live{position:absolute;right:130px;top:8px;display:none;background:var(--accent);color:#000;border:0;font-weight:700}
+#tip{position:absolute;pointer-events:none;background:rgba(13,17,24,.92);border:1px solid var(--line);border-radius:6px;padding:4px 6px;display:none;white-space:pre;font-variant-numeric:tabular-nums}
+#liqlist{position:absolute;left:8px;top:8px;white-space:nowrap;font-size:11px;pointer-events:none;font-variant-numeric:tabular-nums}
+#liqlist div{background:rgba(13,17,24,.75);border-radius:4px;padding:1px 5px;margin-bottom:2px}
+footer{padding:3px 8px;border-top:1px solid var(--line);background:var(--panel);color:var(--muted);font-size:11px;display:flex;gap:10px;flex-wrap:wrap}
+details.more{position:relative}
+details.more>summary{list-style:none;cursor:pointer;border:1px solid var(--line);border-radius:6px;padding:4px 8px;background:#141a24}
+details.more>summary::-webkit-details-marker{display:none}
+.menu{position:absolute;z-index:5;top:110%;left:0;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:8px;display:grid;gap:6px;min-width:220px}
+.menu label{display:flex;justify-content:space-between;gap:8px;align-items:center}
+@media (max-width:640px){.brand small,.hide-s{display:none}#live{right:100px}}
+</style>
+</head>
+<body>
+<div id="app">
+<header>
+  <span class="brand">Dami 訂單流<small>熱圖・清算・Footprint</small></span>
+  <div class="grp">
+    <select id="ex" title="交易所">
+      <option value="binance">Binance 永續</option>
+      <option value="okx">OKX 永續</option>
+    </select>
+    <select id="sym" title="交易對">
+      <option>BTC</option><option>ETH</option><option>SOL</option><option>XRP</option><option>DOGE</option>
+    </select>
+    <select id="tf" title="K 線週期">
+      <option value="60000">1m</option><option value="300000" selected>5m</option><option value="900000">15m</option>
+    </select>
+  </div>
+  <div class="grp">
+    <button id="bHeat" class="on" title="掛單熱圖">掛單</button>
+    <button id="bFp" class="on" title="Footprint">Footprint</button>
+    <button id="bBub" class="on" title="成交泡泡">成交</button>
+    <button id="bLiq" class="on" title="實際清算">清算</button>
+    <button id="bMap" class="on" title="估算清算地圖">清算地圖</button>
+  </div>
+  <details class="more"><summary>設定</summary>
+    <div class="menu">
+      <label>價格分組 <select id="tick"></select></label>
+      <label>熱圖對比 <input id="contrast" type="range" min="0.2" max="3" step="0.1" value="1"></label>
+      <label>泡泡最小量(USD) <select id="bubMin"><option value="0">全部</option><option value="20000" selected>2 萬</option><option value="100000">10 萬</option><option value="500000">50 萬</option></select></label>
+      <label>清算地圖強度 <input id="mapGain" type="range" min="0.2" max="3" step="0.1" value="1"></label>
+      <div class="stat">操作：拖曳平移；滾輪/雙指縮放時間；在右側價格軸拖曳或 Shift+滾輪縮放價格；雙擊回到即時。</div>
+    </div>
+  </details>
+  <span class="px" id="px">—</span>
+</header>
+<div id="stage">
+  <canvas id="cv"></canvas>
+  <div id="liqlist"></div>
+  <button id="live">回到即時</button>
+  <div id="tip"></div>
+</div>
+<footer>
+  <span><span class="dot" id="dot"></span><span id="conn">連線中</span></span>
+  <span id="clock" class="stat"></span>
+  <span id="info" class="stat"></span>
+  <span class="hide-s">清算地圖為模型估算（依成交量×槓桿分布推算），不是交易所真實數據</span>
+</footer>
+</div>
+<script>
+'use strict';
+/* ---------- 基本工具 ---------- */
+const $ = id => document.getElementById(id);
+const TZ = 'Asia/Taipei';
+const fmtTime = (t, sec) => new Date(t).toLocaleTimeString('zh-TW', {hour12:false, timeZone:TZ, hour:'2-digit', minute:'2-digit', second: sec ? '2-digit' : undefined});
+const fmtUsd = v => v >= 1e6 ? (v/1e6).toFixed(2)+'M' : v >= 1e3 ? (v/1e3).toFixed(1)+'K' : v.toFixed(0);
+const fmtQty = v => v >= 1000 ? (v/1000).toFixed(1)+'k' : v >= 100 ? v.toFixed(0) : v >= 10 ? v.toFixed(1) : v.toFixed(2);
+function niceSteps(price){
+  const out = [];
+  const base = Math.pow(10, Math.floor(Math.log10(price)) - 5);
+  for (let e = 0; e < 6; e++) for (const m of [1,2,2.5,5]) out.push(+(m*base*Math.pow(10,e)).toPrecision(6));
+  return out.filter(s => s >= price*0.00001 && s <= price*0.005);
+}
+function autoTick(price){
+  const steps = niceSteps(price);
+  return steps.reduce((a,b) => Math.abs(b - price*0.00025) < Math.abs(a - price*0.00025) ? b : a, steps[0]);
+}
+function decimals(step){ const s = String(step); return s.includes('.') ? s.split('.')[1].length : 0; }
+
+/* ---------- 狀態 ---------- */
+const S = {
+  ex:'binance', sym:'BTC', tf:300000, tick:10, contrast:1, bubMin:20000, mapGain:1,
+  show:{heat:true, fp:true, bub:true, liq:true, map:true},
+  bids:new Map(), asks:new Map(), bookReady:false,
+  cols:[],          // 熱圖快照：{t, base, arr:Float32Array}
+  candles:[],       // {t,o,h,l,c,vb,vs,fp:Map(idx->[sell,buy]), live}
+  bubbles:[],       // 1 秒聚合：{t, pq, q, buy, sell}
+  liqs:[],          // {t,p,q,usd,side:'long'|'short'}
+  lmapL:new Map(), lmapS:new Map(), // 估算清算地圖：bucket idx -> usd
+  last:null, lastTradeT:0, msgCount:0, ctVal:1, gen:0,
+};
+const V = {tEnd:0, msPerPx:1000, pMid:0, pPerPx:1, follow:true, followP:true};
+
+/* ---------- 資料源 ---------- */
+let socks = [], snapTimer = null, reconnectTimer = null;
+
+function status(state, text){ $('dot').className = 'dot ' + state; $('conn').textContent = text; }
+
+async function getJSON(url){
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(url.split('?')[0] + ' HTTP ' + r.status);
+  return r.json();
+}
+
+function resetData(){
+  S.bids.clear(); S.asks.clear(); S.bookReady = false;
+  S.cols = []; S.candles = []; S.bubbles = []; S.liqs = [];
+  S.lmapL.clear(); S.lmapS.clear(); S.last = null;
+  S.far = null; clearTimeout(S.farTimer);
+  $('liqlist').innerHTML = '';
+}
+
+async function start(){
+  const gen = ++S.gen;
+  for (const w of socks) { w.onclose = null; w.close(); } socks = [];
+  clearTimeout(reconnectTimer);
+  resetData();
+  status('wait', '載入歷史 K 線…');
+  try {
+    if (S.ex === 'binance') await startBinance(gen); else await startOkx(gen);
+  } catch (e) {
+    if (gen !== S.gen) return;
+    status('bad', '連線失敗：' + e.message + '（10 秒後重試）');
+    reconnectTimer = setTimeout(() => gen === S.gen && start(), 10000);
+  }
+}
+
+function setupTicks(price){
+  const steps = niceSteps(price);
+  const sel = $('tick');
+  sel.innerHTML = steps.map(s => `<option value="${s}">${s}</option>`).join('');
+  S.tick = autoTick(price);
+  sel.value = String(S.tick);
+}
+
+function initView(price){
+  const W = plot.w || 600, H = plot.h || 400;
+  V.msPerPx = (S.tf * 40) / W;
+  V.pPerPx = (price * 0.012) / H;
+  V.pMid = price; V.follow = true; V.followP = true;
+  V.tEnd = Date.now() + W * 0.15 * V.msPerPx;
+}
+
+/* ---- Binance USDⓈ-M 永續 ----
+   2026 起 Binance 期貨 WebSocket 分流：掛單簿走 /public，成交與清算走 /market。
+   期貨 REST 沒有開放瀏覽器跨域（CORS），所以掛單簿快照改用 WebSocket API（ws-fapi），
+   歷史 K 線先試期貨 REST，失敗再用 Binance 現貨 WebSocket API 的 K 線當背景。 */
+function wsRpc(url, method, params){
+  return new Promise((resolve, reject) => {
+    const w = new WebSocket(url); const to = setTimeout(() => { w.close(); reject(new Error(method + ' 逾時')); }, 10000);
+    w.onopen = () => w.send(JSON.stringify({id:'1', method, params}));
+    w.onmessage = e => { clearTimeout(to); w.close(); const m = JSON.parse(e.data); m.status === 200 ? resolve(m.result) : reject(new Error(method + '：' + (m.error && m.error.msg))); };
+    w.onerror = () => { clearTimeout(to); reject(new Error(method + ' 連線失敗')); };
+  });
+}
+async function startBinance(gen){
+  const sym = S.sym + 'USDT', s = sym.toLowerCase();
+  let kl;
+  try { kl = await getJSON(`https://fapi.binance.com/fapi/v1/klines?symbol=${sym}&interval=${tfName()}&limit=300`); S.histNote = '歷史K：Binance 期貨'; }
+  catch (e) { kl = await wsRpc('wss://ws-api.binance.com:443/ws-api/v3', 'klines', {symbol:sym, interval:tfName(), limit:300}); S.histNote = '歷史K：Binance 現貨（期貨 REST 不支援瀏覽器）'; }
+  if (gen !== S.gen) return;
+  S.ctVal = 1;
+  S.candles = kl.map(k => ({t:+k[0], o:+k[1], h:+k[2], l:+k[3], c:+k[4], vb:+k[9], vs:(+k[5]) - (+k[9]), fp:new Map(), live:false}));
+  const lastPx = S.candles.at(-1).c;
+  setupTicks(lastPx); initView(lastPx); S.last = lastPx;
+  seedLiqMap();
+  const buffer = []; let syncing = true;
+  status('wait', '連線 WebSocket…');
+  const syncBook = async () => {
+    syncing = true; buffer.length = 0; S.bookReady = false;
+    status('wait', '同步掛單簿…');
+    try {
+      const snap = await wsRpc('wss://ws-fapi.binance.com/ws-fapi/v1', 'depth', {symbol:sym, limit:1000});
+      if (gen !== S.gen) return;
+      S.bids.clear(); S.asks.clear();
+      for (const [p,q] of snap.bids) S.bids.set(+p, +q);
+      for (const [p,q] of snap.asks) S.asks.set(+p, +q);
+      const lastU = snap.lastUpdateId;
+      for (const ev of buffer) if (ev.u >= lastU) applyBinDepth(ev);
+      buffer.length = 0; syncing = false; S.bookReady = true;
+      status('ok', 'Binance 即時');
+    } catch (e) { status('bad', '掛單簿快照失敗：' + e.message + '，10 秒後重試'); setTimeout(() => gen === S.gen && syncBook(), 10000); }
+  };
+  let lastU = null;
+  openSock(gen, `wss://fstream.binance.com/public/stream?streams=${s}@depth@500ms`, syncBook, d => {
+    if (d.e !== 'depthUpdate') return;
+    if (syncing) { buffer.push(d); return; }
+    if (lastU !== null && d.pu !== lastU) { lastU = null; syncBook(); buffer.push(d); return; } // 序號斷掉就重新同步
+    lastU = d.u; applyBinDepth(d);
+  });
+  openSock(gen, `wss://fstream.binance.com/market/stream?streams=${s}@aggTrade/${s}@forceOrder`, null, d => {
+    if (d.e === 'aggTrade') onTrade(d.T, +d.p, +d.q, !d.m);
+    else if (d.e === 'forceOrder') { const o = d.o; onLiq(o.T, +(o.ap || o.p), +o.z || +o.q, o.S === 'SELL' ? 'long' : 'short'); }
+  });
+}
+function openSock(gen, url, onOpen, onData){
+  const w = new WebSocket(url); socks.push(w);
+  w.onopen = () => onOpen && onOpen();
+  w.onmessage = ev => { if (gen !== S.gen) return; S.msgCount++; const m = JSON.parse(ev.data); if (m.data) onData(m.data); };
+  w.onclose = () => { if (gen === S.gen) { status('bad', '已斷線，5 秒後重連'); clearTimeout(reconnectTimer); reconnectTimer = setTimeout(() => gen === S.gen && start(), 5000); } };
+  w.onerror = () => status('bad', 'WebSocket 錯誤（Binance 在部分地區會封鎖，可改用 OKX）');
+}
+function applyBinDepth(d){
+  for (const [p,q] of d.b) { const pp = +p, qq = +q; qq === 0 ? S.bids.delete(pp) : S.bids.set(pp, qq); }
+  for (const [p,q] of d.a) { const pp = +p, qq = +q; qq === 0 ? S.asks.delete(pp) : S.asks.set(pp, qq); }
+}
+
+/* ---- OKX 永續 ---- */
+async function startOkx(gen){
+  const inst = `${S.sym}-USDT-SWAP`;
+  const REST = 'https://www.okx.com';
+  const [ins, kl] = await Promise.all([
+    getJSON(`${REST}/api/v5/public/instruments?instType=SWAP&instId=${inst}`),
+    getJSON(`${REST}/api/v5/market/candles?instId=${inst}&bar=${tfName()}&limit=300`),
+  ]);
+  if (gen !== S.gen) return;
+  S.ctVal = +ins.data[0].ctVal;
+  S.candles = kl.data.slice().reverse().map(k => ({t:+k[0], o:+k[1], h:+k[2], l:+k[3], c:+k[4], vb:(+k[6])/2, vs:(+k[6])/2, nd:true, fp:new Map(), live:false}));
+  const lastPx = S.candles.at(-1).c;
+  setupTicks(lastPx); initView(lastPx); S.last = lastPx;
+  seedLiqMap();
+  // OKX 即時頻道只有 400 檔，另外每 5 秒抓 5000 檔深度補足熱圖的遠端掛單
+  const pollFar = async () => {
+    if (gen !== S.gen) return;
+    try {
+      const r = await getJSON(`${REST}/api/v5/market/books-full?instId=${inst}&sz=5000`);
+      if (gen !== S.gen) return;
+      const d = r.data[0], cv = S.ctVal;
+      S.far = {bids:new Map(d.bids.map(([p,q]) => [+p, +q * cv])), asks:new Map(d.asks.map(([p,q]) => [+p, +q * cv]))};
+    } catch (e) {}
+    S.farTimer = setTimeout(pollFar, 5000);
+  };
+  pollFar();
+  status('wait', '連線 WebSocket…');
+  const ws = new WebSocket('wss://ws.okx.com/ws/v5/public'); socks.push(ws); S.histNote = '歷史K：OKX（無主動買賣拆分）';
+  let ping;
+  ws.onopen = () => {
+    ws.send(JSON.stringify({op:'subscribe', args:[
+      {channel:'books', instId:inst}, {channel:'trades', instId:inst},
+      {channel:'liquidation-orders', instType:'SWAP'}]}));
+    ping = setInterval(() => ws.readyState === 1 && ws.send('ping'), 20000);
+    status('ok', 'OKX 即時');
+  };
+  ws.onmessage = ev => {
+    if (gen !== S.gen || ev.data === 'pong') return;
+    const m = JSON.parse(ev.data); S.msgCount++;
+    if (!m.arg || !m.data) return;
+    const ch = m.arg.channel, cv = S.ctVal;
+    if (ch === 'books') {
+      const d = m.data[0];
+      if (m.action === 'snapshot') { S.bids.clear(); S.asks.clear(); }
+      for (const [p,q] of d.bids) { const pp = +p, qq = +q * cv; qq === 0 ? S.bids.delete(pp) : S.bids.set(pp, qq); }
+      for (const [p,q] of d.asks) { const pp = +p, qq = +q * cv; qq === 0 ? S.asks.delete(pp) : S.asks.set(pp, qq); }
+      S.bookReady = true;
+    } else if (ch === 'trades') {
+      for (const t of m.data) onTrade(+t.ts, +t.px, +t.sz * cv, t.side === 'buy');
+    } else if (ch === 'liquidation-orders') {
+      for (const x of m.data) if (x.instId === inst) for (const d of x.details)
+        onLiq(+d.ts, +d.bkPx, +d.sz * cv, d.posSide === 'long' || (d.posSide === 'net' && d.side === 'sell') ? 'long' : 'short');
+    }
+  };
+  ws.onclose = () => { clearInterval(ping); if (gen === S.gen) { status('bad', '已斷線，5 秒後重連'); reconnectTimer = setTimeout(() => gen === S.gen && start(), 5000); } };
+  ws.onerror = () => status('bad', 'WebSocket 錯誤');
+}
+
+function tfName(){ return {60000:'1m', 300000:'5m', 900000:'15m'}[S.tf]; }
+
+/* ---------- 事件處理 ---------- */
+const LEVS = [[10,.30],[25,.30],[50,.25],[100,.15]]; // 槓桿分布假設
+const MMR = 0.005;
+
+function addLiqMap(price, usdBuy, usdSell){
+  const k = S.tick;
+  for (const [L,w] of LEVS) {
+    const pl = price * (1 - 1/L + MMR), ps = price * (1 + 1/L - MMR);
+    if (usdBuy)  { const i = Math.floor(pl / k); S.lmapL.set(i, (S.lmapL.get(i) || 0) + usdBuy * w); }
+    if (usdSell) { const i = Math.floor(ps / k); S.lmapS.set(i, (S.lmapS.get(i) || 0) + usdSell * w); }
+  }
+}
+function sweepLiqMap(lo, hi){
+  const k = S.tick;
+  const li = Math.floor(lo / k), hi_ = Math.floor(hi / k);
+  for (const i of S.lmapL.keys()) if (i >= li) S.lmapL.delete(i);   // 價格跌到，多單已被清
+  for (const i of S.lmapS.keys()) if (i <= hi_) S.lmapS.delete(i);  // 價格漲到，空單已被清
+}
+function seedLiqMap(){
+  S.lmapL.clear(); S.lmapS.clear();
+  for (const c of S.candles) {
+    const mid = (c.o + c.c) / 2;
+    addLiqMap(mid, c.vb * mid, c.vs * mid);
+    sweepLiqMap(c.l, c.h);
+  }
+}
+
+function candleFor(t, p){
+  const ct = Math.floor(t / S.tf) * S.tf;
+  let c = S.candles.at(-1);
+  if (!c || c.t < ct) {
+    c = {t:ct, o:p, h:p, l:p, c:p, vb:0, vs:0, fp:new Map(), live:true};
+    S.candles.push(c);
+    if (S.candles.length > 600) S.candles.shift();
+  }
+  if (c.t > ct) return null;
+  return c;
+}
+
+function onTrade(t, p, q, isBuy){
+  S.last = p; S.lastTradeT = t;
+  const c = candleFor(t, p);
+  if (c) {
+    c.h = Math.max(c.h, p); c.l = Math.min(c.l, p); c.c = p;
+    if (isBuy) c.vb += q; else c.vs += q;
+    const i = Math.floor(p / S.tick);
+    let cell = c.fp.get(i); if (!cell) { cell = [0,0]; c.fp.set(i, cell); }
+    cell[isBuy ? 1 : 0] += q;
+    c.fpLive = true;
+  }
+  // 1 秒成交泡泡
+  const bt = Math.floor(t / 1000) * 1000;
+  let b = S.bubbles.at(-1);
+  if (!b || b.t !== bt) { b = {t:bt, pq:0, q:0, buy:0, sell:0}; S.bubbles.push(b); if (S.bubbles.length > 7200) S.bubbles.shift(); }
+  b.pq += p * q; b.q += q; if (isBuy) b.buy += q; else b.sell += q;
+  // 估算清算地圖
+  addLiqMap(p, isBuy ? p*q : 0, isBuy ? 0 : p*q);
+  sweepLiqMap(p, p);
+  dirty = true;
+}
+
+function onLiq(t, p, q, side){
+  const usd = p * q;
+  S.liqs.push({t, p, q, usd, side});
+  if (S.liqs.length > 3000) S.liqs.shift();
+  const el = document.createElement('div');
+  el.style.color = side === 'long' ? 'var(--liqL)' : 'var(--liqS)';
+  el.textContent = `${fmtTime(t, true)} ${side === 'long' ? '多單爆倉' : '空單爆倉'} ${fmtUsd(usd)} @ ${p.toFixed(decimals(S.tick))}`;
+  const box = $('liqlist'); box.prepend(el);
+  while (box.children.length > 6) box.lastChild.remove();
+  dirty = true;
+}
+
+/* 每秒拍一張掛單簿快照 → 熱圖一欄 */
+function snapshot(){
+  if (!S.bookReady || S.last == null) return;
+  const k = S.tick, mid = Math.floor(S.last / k), R = 500;
+  const base = mid - R, arr = new Float32Array(R * 2 + 1);
+  for (const [p,q] of S.bids) { const j = Math.floor(p / k) - base; if (j >= 0 && j < arr.length) arr[j] += q; }
+  for (const [p,q] of S.asks) { const j = Math.floor(p / k) - base; if (j >= 0 && j < arr.length) arr[j] += q; }
+  if (S.far) {
+    let minBid = Infinity, maxAsk = -Infinity;
+    for (const p of S.bids.keys()) if (p < minBid) minBid = p;
+    for (const p of S.asks.keys()) if (p > maxAsk) maxAsk = p;
+    for (const [p,q] of S.far.bids) if (p < minBid) { const j = Math.floor(p / k) - base; if (j >= 0 && j < arr.length) arr[j] += q; }
+    for (const [p,q] of S.far.asks) if (p > maxAsk) { const j = Math.floor(p / k) - base; if (j >= 0 && j < arr.length) arr[j] += q; }
+  }
+  S.cols.push({t: Math.floor(Date.now() / 1000) * 1000, base, arr, mid: S.last});
+  if (S.cols.length > 3 * 3600) S.cols.shift();
+  dirty = true;
+}
+
+/* ---------- 版面與繪圖 ---------- */
+const cv = $('cv'), ctx = cv.getContext('2d');
+const off = document.createElement('canvas'), octx = off.getContext('2d');
+let dpr = 1, W = 0, H = 0, dirty = true;
+const plot = {x:0, y:0, w:0, h:0}, sub = {y:0, h:0};
+let PROF = 70, AXIS = 64;
+const TAXIS = 18;
+
+function layout(){
+  const st = $('stage');
+  dpr = window.devicePixelRatio || 1;
+  W = st.clientWidth; H = st.clientHeight;
+  cv.width = W * dpr; cv.height = H * dpr; cv.style.width = W + 'px'; cv.style.height = H + 'px';
+  const small = W < 640;
+  PROF = small ? 44 : 80; AXIS = small ? 56 : 66;
+  const subH = small ? 56 : 72;
+  plot.x = 0; plot.y = 0; plot.w = W - PROF - AXIS; plot.h = H - subH - TAXIS;
+  sub.y = plot.h + TAXIS; sub.h = subH;
+  off.width = Math.max(1, plot.w); off.height = Math.max(1, plot.h);
+  dirty = true;
+}
+
+const tX = t => plot.w - (V.tEnd - t) / V.msPerPx;
+const xT = x => V.tEnd - (plot.w - x) * V.msPerPx;
+const pY = p => plot.h / 2 - (p - V.pMid) / V.pPerPx;
+const yP = y => V.pMid + (plot.h / 2 - y) * V.pPerPx;
+
+/* 熱圖色階：深藍→藍→青→黃→橙→白 */
+const LUT = (() => {
+  const stops = [[0,[7,9,13]],[.12,[10,30,70]],[.3,[20,90,170]],[.5,[40,190,220]],[.68,[240,200,60]],[.85,[250,120,30]],[1,[255,245,230]]];
+  const out = new Uint32Array(256);
+  for (let i = 0; i < 256; i++) {
+    const v = i / 255; let a = stops[0], b = stops.at(-1);
+    for (let s = 0; s < stops.length - 1; s++) if (v >= stops[s][0] && v <= stops[s+1][0]) { a = stops[s]; b = stops[s+1]; break; }
+    const f = (v - a[0]) / ((b[0] - a[0]) || 1);
+    const c = a[1].map((x, j) => Math.round(x + (b[1][j] - x) * f));
+    out[i] = (255 << 24) | (c[2] << 16) | (c[1] << 8) | c[0];
+  }
+  return out;
+})();
+
+function colAt(t){
+  const cols = S.cols; if (!cols.length || t < cols[0].t || t > cols.at(-1).t + 1500) return null;
+  let lo = 0, hi = cols.length - 1;
+  while (lo < hi) { const m = (lo + hi + 1) >> 1; if (cols[m].t <= t) lo = m; else hi = m - 1; }
+  return cols[lo];
+}
+
+function drawHeat(){
+  const w = plot.w, h = plot.h;
+  const img = octx.createImageData(w, h);
+  const buf = new Uint32Array(img.data.buffer);
+  buf.fill(LUT[0]);
+  if (S.show.heat && S.cols.length) {
+    const k = S.tick;
+    const rowIdx = new Int32Array(h);
+    for (let y = 0; y < h; y++) rowIdx[y] = Math.floor(yP(y + 0.5) / k);
+    // 正規化：取可見範圍內的高分位數
+    const samples = [];
+    const step = Math.max(1, Math.floor(w / 120));
+    for (let x = 0; x < w; x += step) {
+      const c = colAt(xT(x)); if (!c) continue;
+      for (let y = 0; y < h; y += 4) { const v = c.arr[rowIdx[y] - c.base]; if (v > 0) samples.push(v); }
+    }
+    samples.sort((a, b) => a - b);
+    const ref = (samples[Math.floor(samples.length * 0.995)] || 1) / S.contrast;
+    let prev = null, prevX = -1;
+    for (let x = 0; x < w; x++) {
+      const c = colAt(xT(x + 0.5));
+      if (!c) continue;
+      if (c === prev && prevX === x - 1) {
+        for (let y = 0; y < h; y++) buf[y * w + x] = buf[y * w + x - 1];
+      } else {
+        for (let y = 0; y < h; y++) {
+          const v = c.arr[rowIdx[y] - c.base];
+          if (v > 0) buf[y * w + x] = LUT[Math.min(255, Math.round(Math.pow(v / ref, 0.6) * 255))];
+        }
+      }
+      prev = c; prevX = x;
+    }
+  }
+  octx.putImageData(img, 0, 0);
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(off, plot.x, plot.y, w, h);
+}
+
+function drawLiqMap(){
+  if (!S.show.map) return;
+  const k = S.tick, bandH = Math.max(1, k / V.pPerPx);
+  let mx = 0;
+  const vis = [];
+  for (const [m, col] of [[S.lmapL, 'long'], [S.lmapS, 'short']]) for (const [i, usd] of m) {
+    const y = pY((i + 1) * k); if (y < -bandH || y > plot.h) continue;
+    vis.push([y, usd, col]); if (usd > mx) mx = usd;
+  }
+  if (!mx) return;
+  const xStart = plot.w * 0.0;
+  for (const [y, usd, side] of vis) {
+    const a = Math.min(1, Math.pow(usd / mx, 1.2) * S.mapGain) * 0.38;
+    if (a < 0.03) continue;
+    ctx.fillStyle = side === 'long' ? `rgba(255,61,184,${a})` : `rgba(61,216,255,${a})`;
+    ctx.fillRect(xStart, y, plot.w - xStart, Math.max(1, bandH));
+  }
+  S._liqMapMax = mx; S._liqMapVis = vis;
+}
+
+function drawCandles(){
+  const k = S.tick, cellH = k / V.pPerPx;
+  const dec = decimals(k);
+  for (const c of S.candles) {
+    const x0 = tX(c.t), x1 = tX(c.t + S.tf);
+    if (x1 < 0 || x0 > plot.w) continue;
+    const cw = x1 - x0;
+    const up = c.c >= c.o;
+    const fpMode = S.show.fp && c.fp.size && cw >= 70 && cellH >= 11;
+    if (fpMode) {
+      // Footprint：左賣右買，底色依 delta
+      let maxV = 0, poc = null, pocV = 0;
+      for (const [i, [s, b]] of c.fp) { const t = s + b; if (Math.max(s,b) > maxV) maxV = Math.max(s,b); if (t > pocV) { pocV = t; poc = i; } }
+      ctx.font = `${Math.min(12, cellH - 2)}px ui-monospace,Menlo,monospace`;
+      ctx.textBaseline = 'middle';
+      const mid = x0 + cw / 2, pad = 3;
+      for (const [i, [s, b]] of c.fp) {
+        const yTop = pY((i + 1) * k), yy = yTop + cellH / 2;
+        if (yTop > plot.h || yTop + cellH < 0) continue;
+        const ws = (s / maxV) * (cw / 2 - pad), wb = (b / maxV) * (cw / 2 - pad);
+        ctx.fillStyle = 'rgba(239,77,90,.35)'; ctx.fillRect(mid - ws, yTop + 1, ws, cellH - 2);
+        ctx.fillStyle = 'rgba(34,197,139,.35)'; ctx.fillRect(mid, yTop + 1, wb, cellH - 2);
+        // 失衡（3 倍）高亮
+        const imbB = b > s * 3 && b > maxV * 0.15, imbS = s > b * 3 && s > maxV * 0.15;
+        ctx.fillStyle = imbS ? '#ff8a94' : '#c9d1dd'; ctx.textAlign = 'right'; ctx.fillText(fmtQty(s), mid - pad, yy);
+        ctx.fillStyle = imbB ? '#6ff0bd' : '#c9d1dd'; ctx.textAlign = 'left'; ctx.fillText(fmtQty(b), mid + pad, yy);
+        if (i === poc) { ctx.strokeStyle = '#f5b83d'; ctx.lineWidth = 1; ctx.strokeRect(x0 + 1.5, yTop + 0.5, cw - 3, cellH - 1); }
+      }
+      ctx.strokeStyle = up ? 'rgba(34,197,139,.7)' : 'rgba(239,77,90,.7)';
+      ctx.strokeRect(x0 + 0.5, pY(c.h), cw - 1, Math.max(1, pY(c.l) - pY(c.h)));
+    } else {
+      const bw = Math.max(1, cw * 0.62), bx = x0 + (cw - bw) / 2, cx = x0 + cw / 2;
+      ctx.strokeStyle = ctx.fillStyle = up ? 'rgba(34,197,139,.9)' : 'rgba(239,77,90,.9)';
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(Math.round(cx) + .5, pY(c.h)); ctx.lineTo(Math.round(cx) + .5, pY(c.l)); ctx.stroke();
+      const yo = pY(c.o), yc = pY(c.c);
+      ctx.globalAlpha = 0.55; ctx.fillRect(bx, Math.min(yo, yc), bw, Math.max(1, Math.abs(yo - yc))); ctx.globalAlpha = 1;
+      ctx.strokeRect(bx + .5, Math.min(yo, yc) + .5, bw - 1, Math.max(1, Math.abs(yo - yc)) - 1);
+    }
+  }
+}
+
+function drawBubbles(){
+  if (!S.show.bub) return;
+  const vis = [];
+  let mx = 0;
+  for (const b of S.bubbles) {
+    const x = tX(b.t + 500); if (x < -20 || x > plot.w + 20) continue;
+    const p = b.pq / b.q, usd = p * b.q;
+    if (usd < S.bubMin) continue;
+    vis.push([x, pY(p), usd, b.buy >= b.sell, b]); if (usd > mx) mx = usd;
+  }
+  for (const [x, y, usd, isBuy] of vis) {
+    const r = 2 + Math.sqrt(usd / (mx || 1)) * 16;
+    ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.fillStyle = isBuy ? 'rgba(34,197,139,.45)' : 'rgba(239,77,90,.45)'; ctx.fill();
+    ctx.strokeStyle = isBuy ? 'rgba(111,240,189,.9)' : 'rgba(255,138,148,.9)'; ctx.lineWidth = 1; ctx.stroke();
+  }
+  S._bubVis = vis;
+}
+
+function drawLiqs(){
+  if (!S.show.liq) return;
+  let mx = 0; for (const l of S.liqs) if (l.usd > mx) mx = l.usd;
+  for (const l of S.liqs) {
+    const x = tX(l.t), y = pY(l.p); if (x < -20 || x > plot.w + 20) continue;
+    const r = 4 + Math.sqrt(l.usd / (mx || 1)) * 12;
+    ctx.save(); ctx.translate(x, y); ctx.rotate(Math.PI / 4);
+    ctx.fillStyle = l.side === 'long' ? 'rgba(255,61,184,.85)' : 'rgba(61,216,255,.85)';
+    ctx.fillRect(-r/2, -r/2, r, r);
+    ctx.strokeStyle = '#fff'; ctx.lineWidth = .8; ctx.strokeRect(-r/2, -r/2, r, r);
+    ctx.restore();
+  }
+}
+
+function drawPriceLine(){
+  if (S.last == null) return;
+  const y = Math.round(pY(S.last)) + .5;
+  ctx.setLineDash([4, 3]); ctx.strokeStyle = 'rgba(245,184,61,.8)'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(plot.w + PROF, y); ctx.stroke(); ctx.setLineDash([]);
+  // 現在時間線
+  const xn = Math.round(tX(Date.now())) + .5;
+  ctx.strokeStyle = 'rgba(255,255,255,.12)'; ctx.beginPath(); ctx.moveTo(xn, 0); ctx.lineTo(xn, plot.h); ctx.stroke();
+}
+
+function drawProfile(){
+  const x0 = plot.w, k = S.tick, cellH = Math.max(1, k / V.pPerPx);
+  ctx.fillStyle = '#0a0d13'; ctx.fillRect(x0, 0, PROF, plot.h);
+  // 目前掛單簿深度
+  const agg = new Map(); let mx = 0;
+  const lo = yP(plot.h), hi = yP(0);
+  for (const [m, side] of [[S.bids, 'b'], [S.asks, 'a']]) for (const [p, q] of m) {
+    if (p < lo - k || p > hi + k) continue;
+    const i = Math.floor(p / k); const key = i * 2 + (side === 'a' ? 1 : 0);
+    const v = (agg.get(key) || 0) + q; agg.set(key, v); if (v > mx) mx = v;
+  }
+  for (const [key, v] of agg) {
+    const i = Math.floor(key / 2), isAsk = key % 2 === 1;
+    const y = pY((i + 1) * k), w = (v / mx) * (PROF - 4);
+    ctx.fillStyle = isAsk ? 'rgba(239,77,90,.75)' : 'rgba(34,197,139,.75)';
+    ctx.fillRect(x0 + 2, y, w, Math.max(1, cellH - (cellH > 3 ? 1 : 0)));
+  }
+  // 估算清算量（右側對齊）
+  if (S.show.map && S._liqMapVis && S._liqMapMax) {
+    for (const [y, usd, side] of S._liqMapVis) {
+      const w = (usd / S._liqMapMax) * (PROF - 4);
+      ctx.fillStyle = side === 'long' ? 'rgba(255,61,184,.55)' : 'rgba(61,216,255,.55)';
+      ctx.fillRect(x0 + PROF - 2 - w, y, w, Math.max(1, cellH));
+    }
+  }
+  ctx.strokeStyle = '#1c2330'; ctx.beginPath(); ctx.moveTo(x0 + .5, 0); ctx.lineTo(x0 + .5, plot.h); ctx.stroke();
+}
+
+function niceGrid(range, px, minPx){
+  const raw = range * minPx / px; const e = Math.pow(10, Math.floor(Math.log10(raw)));
+  for (const m of [1, 2, 2.5, 5, 10]) if (m * e >= raw) return m * e;
+  return 10 * e;
+}
+
+function drawAxes(){
+  const ax = plot.w + PROF;
+  ctx.fillStyle = '#0d1118'; ctx.fillRect(ax, 0, AXIS, H);
+  ctx.font = '11px ui-monospace,Menlo,monospace'; ctx.textBaseline = 'middle'; ctx.textAlign = 'left';
+  const lo = yP(plot.h), hi = yP(0), step = niceGrid(hi - lo, plot.h, 40);
+  const dec = Math.max(0, -Math.floor(Math.log10(step)) + (step % 1 ? 1 : 0));
+  for (let p = Math.ceil(lo / step) * step; p <= hi; p += step) {
+    const y = Math.round(pY(p)) + .5;
+    ctx.strokeStyle = 'rgba(255,255,255,.05)'; ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(plot.w, y); ctx.stroke();
+    ctx.fillStyle = '#7b8699'; ctx.fillText(p.toFixed(Math.min(dec, 6)), ax + 5, y);
+  }
+  if (S.last != null) {
+    const y = pY(S.last);
+    ctx.fillStyle = '#f5b83d'; ctx.fillRect(ax, y - 8, AXIS, 16);
+    ctx.fillStyle = '#000'; ctx.fillText(S.last.toFixed(decimals(S.tick) + 1), ax + 4, y);
+  }
+  // 時間軸
+  ctx.fillStyle = '#0d1118'; ctx.fillRect(0, plot.h, plot.w + PROF, TAXIS);
+  const tstep = [1,5,15,30,60,300,900,1800,3600,7200,14400].map(s => s * 1000).find(s => s / V.msPerPx >= 80) || 14400000;
+  ctx.textAlign = 'center'; ctx.fillStyle = '#7b8699';
+  for (let t = Math.ceil(xT(0) / tstep) * tstep; t <= xT(plot.w); t += tstep) {
+    const x = Math.round(tX(t)) + .5;
+    ctx.strokeStyle = 'rgba(255,255,255,.05)'; ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, plot.h); ctx.stroke();
+    ctx.fillText(fmtTime(t, tstep < 60000), x, plot.h + TAXIS / 2);
+  }
+}
+
+function drawSub(){
+  const y0 = sub.y, h = sub.h;
+  ctx.fillStyle = '#080b10'; ctx.fillRect(0, y0, plot.w + PROF, h);
+  ctx.strokeStyle = '#1c2330'; ctx.beginPath(); ctx.moveTo(0, y0 + .5); ctx.lineTo(W, y0 + .5); ctx.stroke();
+  const vis = S.candles.filter(c => !c.nd && tX(c.t + S.tf) >= 0 && tX(c.t) <= plot.w);
+  let mx = 0; for (const c of vis) mx = Math.max(mx, Math.abs(c.vb - c.vs));
+  const midY = y0 + h / 2;
+  // CVD
+  let cvd = 0, mnC = Infinity, mxC = -Infinity; const pts = [];
+  for (const c of vis) { cvd += c.vb - c.vs; pts.push([tX(c.t + S.tf / 2), cvd]); mnC = Math.min(mnC, cvd); mxC = Math.max(mxC, cvd); }
+  for (const c of vis) {
+    const x0 = tX(c.t), cw = tX(c.t + S.tf) - x0, d = c.vb - c.vs;
+    const bh = (Math.abs(d) / (mx || 1)) * (h / 2 - 4);
+    ctx.fillStyle = d >= 0 ? 'rgba(34,197,139,.8)' : 'rgba(239,77,90,.8)';
+    ctx.fillRect(x0 + cw * 0.2, d >= 0 ? midY - bh : midY, Math.max(1, cw * 0.6), Math.max(1, bh));
+  }
+  if (pts.length > 1 && mxC > mnC) {
+    ctx.strokeStyle = 'rgba(245,184,61,.9)'; ctx.lineWidth = 1.2; ctx.beginPath();
+    pts.forEach(([x, v], i) => { const y = y0 + 4 + (1 - (v - mnC) / (mxC - mnC)) * (h - 8); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
+    ctx.stroke();
+  }
+  ctx.fillStyle = '#7b8699'; ctx.font = '10px sans-serif'; ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+  ctx.fillText('Delta / CVD', 4, y0 + 3);
+}
+
+function render(){
+  if (!plot.w || plot.w < 20) return;
+  if (V.follow) V.tEnd = Date.now() + plot.w * 0.15 * V.msPerPx;
+  if (V.followP && S.last != null) {
+    const y = pY(S.last);
+    if (y < plot.h * 0.25 || y > plot.h * 0.75) V.pMid += (S.last - V.pMid) * 0.2;
+  }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.fillStyle = '#07090d'; ctx.fillRect(0, 0, W, H);
+  ctx.save(); ctx.beginPath(); ctx.rect(0, 0, plot.w, plot.h); ctx.clip();
+  drawHeat(); drawLiqMap(); drawCandles(); drawBubbles(); drawLiqs();
+  ctx.restore();
+  ctx.save(); ctx.beginPath(); ctx.rect(0, 0, plot.w + PROF, plot.h); ctx.clip();
+  drawProfile(); drawPriceLine();
+  ctx.restore();
+  drawAxes(); drawSub();
+  $('live').style.display = V.follow ? 'none' : 'block';
+  if (S.last != null) $('px').textContent = `${S.sym}USDT ${S.last.toFixed(decimals(S.tick) + 1)}`;
+}
+
+let lastFrame = 0;
+function loop(ts){
+  requestAnimationFrame(loop);
+  if (ts - lastFrame < 66) return; // ~15fps
+  lastFrame = ts;
+  render();
+}
+
+/* ---------- 互動：拖曳、縮放、雙指 ---------- */
+const pts = new Map();
+let drag = null, pinch = null, lastTap = 0;
+cv.addEventListener('pointerdown', e => {
+  cv.setPointerCapture(e.pointerId);
+  pts.set(e.pointerId, {x: e.offsetX, y: e.offsetY});
+  if (pts.size === 1) {
+    const now = Date.now();
+    if (now - lastTap < 300) { goLive(); lastTap = 0; return; }
+    lastTap = now;
+    drag = {x: e.offsetX, y: e.offsetY, tEnd: V.tEnd, pMid: V.pMid, pPerPx: V.pPerPx, axis: e.offsetX > plot.w + PROF};
+  } else if (pts.size === 2) {
+    const [a, b] = [...pts.values()];
+    pinch = {dx: Math.max(30, Math.abs(a.x - b.x)), dy: Math.max(30, Math.abs(a.y - b.y)), ms: V.msPerPx, pp: V.pPerPx};
+    drag = null;
+  }
+});
+cv.addEventListener('pointermove', e => {
+  if (pts.has(e.pointerId)) pts.set(e.pointerId, {x: e.offsetX, y: e.offsetY});
+  if (pinch && pts.size === 2) {
+    const [a, b] = [...pts.values()];
+    const dx = Math.max(30, Math.abs(a.x - b.x)), dy = Math.max(30, Math.abs(a.y - b.y));
+    V.msPerPx = clampMs(pinch.ms * pinch.dx / dx);
+    V.pPerPx = pinch.pp * pinch.dy / dy;
+    return;
+  }
+  if (drag) {
+    if (drag.axis) { V.pPerPx = Math.max(1e-9, drag.pPerPx * Math.exp((e.offsetY - drag.y) / 120)); V.followP = false; return; }
+    const ddx = e.offsetX - drag.x, ddy = e.offsetY - drag.y;
+    if (Math.abs(ddx) + Math.abs(ddy) > 3) { V.follow = false; V.followP = false; }
+    V.tEnd = drag.tEnd - ddx * V.msPerPx;
+    V.pMid = drag.pMid + ddy * V.pPerPx;
+    return;
+  }
+  hover(e.offsetX, e.offsetY);
+});
+const endPtr = e => { pts.delete(e.pointerId); if (pts.size < 2) pinch = null; if (!pts.size) drag = null; };
+cv.addEventListener('pointerup', endPtr); cv.addEventListener('pointercancel', endPtr);
+cv.addEventListener('pointerleave', () => $('tip').style.display = 'none');
+cv.addEventListener('wheel', e => {
+  e.preventDefault();
+  const f = Math.exp(e.deltaY / 400);
+  if (e.shiftKey || e.offsetX > plot.w + PROF) { V.pPerPx *= f; V.followP = false; }
+  else {
+    const tAt = xT(e.offsetX);
+    V.msPerPx = clampMs(V.msPerPx * f);
+    if (!V.follow) V.tEnd = tAt + (plot.w - e.offsetX) * V.msPerPx;
+  }
+}, {passive: false});
+function clampMs(v){ return Math.min(Math.max(v, 30), S.tf * 3); }
+function goLive(){
+  V.follow = true; V.followP = true;
+  if (S.last != null) { V.pMid = S.last; V.pPerPx = (S.last * 0.012) / plot.h; }
+  V.msPerPx = (S.tf * 40) / plot.w;
+}
+$('live').onclick = goLive;
+
+function hover(x, y){
+  const tip = $('tip');
+  if (x > plot.w || y > plot.h) { tip.style.display = 'none'; return; }
+  const t = xT(x), p = yP(y), k = S.tick, i = Math.floor(p / k);
+  const lines = [`${fmtTime(t, true)}   ${p.toFixed(decimals(k) + 1)}`];
+  const c = colAt(t); if (c) { const v = c.arr[i - c.base]; if (v) lines.push(`掛單量 ${fmtQty(v)} ${S.sym}（≈${fmtUsd(v * p)}）`); }
+  const cd = S.candles.find(cc => t >= cc.t && t < cc.t + S.tf);
+  if (cd) {
+    lines.push(`K：開${cd.o} 高${cd.h} 低${cd.l} 收${cd.c}`);
+    lines.push(`Delta ${fmtQty(cd.vb - cd.vs)}（買 ${fmtQty(cd.vb)} / 賣 ${fmtQty(cd.vs)}）`);
+    const cell = cd.fp.get(i); if (cell) lines.push(`此價位 賣 ${fmtQty(cell[0])} × 買 ${fmtQty(cell[1])}`);
+  }
+  const lm = (S.lmapL.get(i) || 0) + (S.lmapS.get(i) || 0);
+  if (S.show.map && lm) lines.push(`估算清算量 ≈ ${fmtUsd(lm)}`);
+  tip.textContent = lines.join('\n');
+  tip.style.display = 'block';
+  tip.style.left = Math.min(x + 12, W - 230) + 'px'; tip.style.top = Math.min(y + 12, plot.h - 80) + 'px';
+}
+
+/* ---------- 控制項 ---------- */
+const toggles = {bHeat:'heat', bFp:'fp', bBub:'bub', bLiq:'liq', bMap:'map'};
+for (const [id, key] of Object.entries(toggles)) $(id).onclick = () => { S.show[key] = !S.show[key]; $(id).classList.toggle('on', S.show[key]); savePrefs(); };
+$('ex').onchange = e => { S.ex = e.target.value; savePrefs(); start(); };
+$('sym').onchange = e => { S.sym = e.target.value; savePrefs(); start(); };
+$('tf').onchange = e => { S.tf = +e.target.value; savePrefs(); start(); };
+$('tick').onchange = e => {
+  S.tick = +e.target.value;
+  S.cols = []; for (const c of S.candles) c.fp = new Map();
+  seedLiqMap();
+};
+$('contrast').oninput = e => S.contrast = +e.target.value;
+$('mapGain').oninput = e => S.mapGain = +e.target.value;
+$('bubMin').onchange = e => S.bubMin = +e.target.value;
+
+function savePrefs(){ try { localStorage.setItem('dami-of', JSON.stringify({ex:S.ex, sym:S.sym, tf:S.tf, show:S.show})); } catch (e) {} }
+function loadPrefs(){
+  try {
+    const p = JSON.parse(localStorage.getItem('dami-of') || 'null'); if (!p) return;
+    Object.assign(S, {ex:p.ex || S.ex, sym:p.sym || S.sym, tf:p.tf || S.tf}); Object.assign(S.show, p.show || {});
+    $('ex').value = S.ex; $('sym').value = S.sym; $('tf').value = String(S.tf);
+    for (const [id, key] of Object.entries(toggles)) $(id).classList.toggle('on', S.show[key]);
+  } catch (e) {}
+}
+
+setInterval(() => {
+  $('clock').textContent = '台北 ' + fmtTime(Date.now(), true);
+  const age = S.lastTradeT ? ((Date.now() - S.lastTradeT) / 1000).toFixed(1) + 's 前成交' : '尚無成交';
+  $('info').textContent = `${S.ex === 'binance' ? 'Binance' : 'OKX'} ${S.sym}USDT 永續・${age}・熱圖 ${S.cols.length} 秒・分組 ${S.tick}・${S.histNote || ''}`;
+}, 1000);
+snapTimer = setInterval(snapshot, 1000);
+window.addEventListener('resize', layout);
+loadPrefs(); layout(); requestAnimationFrame(loop); start();
+</script>
+</body>
+</html>
