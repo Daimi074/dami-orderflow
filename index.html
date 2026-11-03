@@ -61,6 +61,7 @@ details.more>summary::-webkit-details-marker{display:none}
     <button id="bBub" class="on" title="成交泡泡">成交</button>
     <button id="bLiq" class="on" title="實際清算">清算</button>
     <button id="bMap" class="on" title="估算清算地圖">清算地圖</button>
+    <button id="bIct" class="on" title="ICT 結構：Swing 流動性、等高等低、FVG、掃單收回（只做標示，不是買賣訊號）">ICT</button>
   </div>
   <details class="more"><summary>設定</summary>
     <div class="menu">
@@ -83,7 +84,7 @@ details.more>summary::-webkit-details-marker{display:none}
   <span><span class="dot" id="dot"></span><span id="conn">連線中</span></span>
   <span id="clock" class="stat"></span>
   <span id="info" class="stat"></span>
-  <span class="hide-s">清算地圖為模型估算（依成交量×槓桿分布推算），不是交易所真實數據</span>
+  <span class="hide-s">ICT 標記只做位置參考、不是買賣訊號；清算地圖為模型估算（依成交量×槓桿分布推算），不是交易所真實數據</span>
 </footer>
 </div>
 <script>
@@ -109,7 +110,7 @@ function decimals(step){ const s = String(step); return s.includes('.') ? s.spli
 /* ---------- 狀態 ---------- */
 const S = {
   ex:'binance', sym:'BTC', tf:300000, tick:10, contrast:1, bubMin:20000, mapGain:1,
-  show:{heat:true, fp:true, bub:true, liq:true, map:true},
+  show:{heat:true, fp:true, bub:true, liq:true, map:true, ict:true},
   bids:new Map(), asks:new Map(), bookReady:false,
   cols:[],          // 熱圖快照：{t, base, arr:Float32Array}
   candles:[],       // {t,o,h,l,c,vb,vs,fp:Map(idx->[sell,buy]), live}
@@ -492,6 +493,124 @@ function drawLiqMap(){
   S._liqMapMax = mx; S._liqMapVis = vis;
 }
 
+/* ---------- ICT 結構（只用已收盤 K 線；只做標示，不產生買賣訊號） ----------
+   Swing：左右各 ICT_L 根確認（會延後 ICT_L 根才出現，但出現後不會消失）
+   流動性：Swing 高/低點水平線，被價格穿越時結束；穿越後收回 = 掃單，收在外面 = 突破
+   等高/等低：兩個 Swing 相差 ≤ 0.1 ATR14
+   FVG：三根 K 缺口 ≥ 0.2 ATR14，價格回到缺口中線即視為回補 */
+const ICT_L = 3;
+let ictCache = {key:'', data:null};
+function computeIct(){
+  const now = Date.now();
+  const cs = S.candles.filter(c => c.t + S.tf <= now);
+  const key = cs.length + '|' + (cs.length ? cs.at(-1).t + ':' + cs.at(-1).c : '') + '|' + S.tf;
+  if (ictCache.key === key) return ictCache.data;
+  const n = cs.length, L = ICT_L;
+  const atr = new Array(n).fill(NaN);
+  let a = 0;
+  for (let i = 0; i < n; i++) {
+    const c = cs[i], pc = i ? cs[i-1].c : c.c;
+    const tr = Math.max(c.h - c.l, Math.abs(c.h - pc), Math.abs(c.l - pc));
+    a = i === 0 ? tr : a + (tr - a) / 14; atr[i] = a;
+  }
+  const levels = [], eqs = [], fvgs = [], sweeps = [];
+  const lastH = [], lastL = [];
+  for (let i = L; i < n - L; i++) {
+    let isH = true, isL = true;
+    for (let j = i - L; j <= i + L; j++) {
+      if (j === i) continue;
+      if (j < i ? cs[j].h >= cs[i].h : cs[j].h > cs[i].h) isH = false;
+      if (j < i ? cs[j].l <= cs[i].l : cs[j].l < cs[i].l) isL = false;
+    }
+    for (const [ok, side, price, list] of [[isH, 'H', cs[i].h, lastH], [isL, 'L', cs[i].l, lastL]]) {
+      if (!ok) continue;
+      const lv = {side, price, i, end:null, kind:null};
+      // 從確認那根之後找第一根穿越的 K
+      for (let j = i + L + 1; j < n; j++) {
+        const crossed = side === 'H' ? cs[j].h > price : cs[j].l < price;
+        if (!crossed) continue;
+        const back = side === 'H' ? cs[j].c < price : cs[j].c > price;
+        lv.end = j; lv.kind = back ? 'sweep' : 'break';
+        if (back) sweeps.push({j, side, price});
+        break;
+      }
+      const prev = list.at(-1);
+      // 等高/等低：前一個同側 Swing 在新 Swing 形成時仍未被穿越，且兩者相差 ≤ 0.1 ATR
+      if (prev && (prev.end === null || prev.end > i) && Math.abs(prev.price - price) <= 0.1 * atr[i])
+        eqs.push({side, a:prev, b:lv});
+      list.push(lv); levels.push(lv);
+    }
+  }
+  for (let i = 2; i < n; i++) {
+    const minH = 0.2 * atr[i];
+    if (cs[i].l > cs[i-2].h && cs[i].l - cs[i-2].h >= minH) fvgs.push({dir:1, top:cs[i].l, bot:cs[i-2].h, i:i-1});
+    if (cs[i].h < cs[i-2].l && cs[i-2].l - cs[i].h >= minH) fvgs.push({dir:-1, top:cs[i-2].l, bot:cs[i].h, i:i-1});
+  }
+  for (const g of fvgs) {
+    const mid = (g.top + g.bot) / 2; g.end = null;
+    for (let j = g.i + 2; j < n; j++) if (g.dir === 1 ? cs[j].l <= mid : cs[j].h >= mid) { g.end = j; break; }
+  }
+  const data = {cs, levels, eqs, fvgs, sweeps};
+  ictCache = {key, data};
+  return data;
+}
+function drawIct(){
+  if (!S.show.ict || !S.candles.length) return;
+  const {cs, levels, eqs, fvgs, sweeps} = computeIct();
+  const xOf = i => tX(cs[i].t + S.tf / 2), xEnd = j => j === null ? plot.w : tX(cs[j].t + S.tf / 2);
+  // FVG：只畫未回補的，回補的淡淡畫到回補那根
+  for (const g of fvgs) {
+    const x0 = tX(cs[g.i].t), x1 = xEnd(g.end);
+    if (x1 < 0 || x0 > plot.w) continue;
+    const y0 = pY(g.top), y1 = pY(g.bot);
+    const live = g.end === null;
+    ctx.fillStyle = g.dir === 1 ? `rgba(34,197,139,${live ? .16 : .06})` : `rgba(239,77,90,${live ? .16 : .06})`;
+    ctx.fillRect(x0, y0, x1 - x0, y1 - y0);
+    if (live) {
+      ctx.strokeStyle = g.dir === 1 ? 'rgba(34,197,139,.55)' : 'rgba(239,77,90,.55)'; ctx.lineWidth = 1;
+      ctx.strokeRect(x0 + .5, y0 + .5, x1 - x0, y1 - y0);
+      ctx.fillStyle = g.dir === 1 ? '#6ff0bd' : '#ff8a94'; ctx.font = '10px sans-serif'; ctx.textAlign = 'right'; ctx.textBaseline = 'bottom';
+      ctx.fillText(g.dir === 1 ? '多 FVG' : '空 FVG', plot.w - 4, y0 - 1);
+    }
+  }
+  // Swing 流動性線
+  ctx.lineWidth = 1;
+  for (const lv of levels) {
+    const x0 = xOf(lv.i), x1 = xEnd(lv.end); if (x1 < 0 || x0 > plot.w) continue;
+    const y = Math.round(pY(lv.price)) + .5;
+    ctx.setLineDash(lv.end === null ? [] : [2, 3]);
+    ctx.strokeStyle = lv.end === null ? (lv.side === 'H' ? 'rgba(255,170,90,.75)' : 'rgba(120,200,255,.75)') : 'rgba(200,200,200,.3)';
+    ctx.beginPath(); ctx.moveTo(x0, y); ctx.lineTo(x1, y); ctx.stroke();
+    if (lv.end === null) {
+      ctx.fillStyle = lv.side === 'H' ? 'rgba(255,170,90,.9)' : 'rgba(120,200,255,.9)';
+      ctx.font = '10px sans-serif'; ctx.textAlign = 'left'; ctx.textBaseline = lv.side === 'H' ? 'bottom' : 'top';
+      ctx.fillText(lv.side === 'H' ? '買方停損 / 高點流動性' : '賣方停損 / 低點流動性', x0 + 4, lv.side === 'H' ? y - 1 : y + 1);
+    }
+  }
+  ctx.setLineDash([]);
+  // 等高 / 等低
+  for (const e of eqs) {
+    const x0 = xOf(e.a.i), x1 = xOf(e.b.i); if (x1 < 0 || x0 > plot.w) continue;
+    const y = pY((e.a.price + e.b.price) / 2);
+    ctx.setLineDash([1, 2]); ctx.strokeStyle = 'rgba(245,184,61,.9)'; ctx.beginPath(); ctx.moveTo(x0, y); ctx.lineTo(x1, y); ctx.stroke(); ctx.setLineDash([]);
+    ctx.fillStyle = '#f5b83d'; ctx.font = 'bold 10px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = e.side === 'H' ? 'bottom' : 'top';
+    ctx.fillText(e.side === 'H' ? 'EQH' : 'EQL', (x0 + x1) / 2, e.side === 'H' ? y - 2 : y + 2);
+  }
+  // 掃單收回
+  for (const sw of sweeps) {
+    const c = cs[sw.j], x = xOf(sw.j); if (x < -10 || x > plot.w + 10) continue;
+    const up = sw.side === 'L';               // 掃低收回 → 觀察多方
+    const y = up ? pY(c.l) + 6 : pY(c.h) - 6;
+    ctx.fillStyle = up ? '#6ff0bd' : '#ff8a94';
+    ctx.beginPath();
+    if (up) { ctx.moveTo(x, y); ctx.lineTo(x - 5, y + 8); ctx.lineTo(x + 5, y + 8); }
+    else { ctx.moveTo(x, y); ctx.lineTo(x - 5, y - 8); ctx.lineTo(x + 5, y - 8); }
+    ctx.fill();
+    ctx.font = '10px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = up ? 'top' : 'bottom';
+    ctx.fillText(up ? '掃低收回' : '掃高收回', x, up ? y + 10 : y - 10);
+  }
+}
+
 function drawCandles(){
   const k = S.tick, cellH = k / V.pPerPx;
   const dec = decimals(k);
@@ -673,7 +792,7 @@ function render(){
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.fillStyle = '#07090d'; ctx.fillRect(0, 0, W, H);
   ctx.save(); ctx.beginPath(); ctx.rect(0, 0, plot.w, plot.h); ctx.clip();
-  drawHeat(); drawLiqMap(); drawCandles(); drawBubbles(); drawLiqs();
+  drawHeat(); drawLiqMap(); drawIct(); drawCandles(); drawBubbles(); drawLiqs();
   ctx.restore();
   ctx.save(); ctx.beginPath(); ctx.rect(0, 0, plot.w + PROF, plot.h); ctx.clip();
   drawProfile(); drawPriceLine();
@@ -768,7 +887,7 @@ function hover(x, y){
 }
 
 /* ---------- 控制項 ---------- */
-const toggles = {bHeat:'heat', bFp:'fp', bBub:'bub', bLiq:'liq', bMap:'map'};
+const toggles = {bHeat:'heat', bFp:'fp', bBub:'bub', bLiq:'liq', bMap:'map', bIct:'ict'};
 for (const [id, key] of Object.entries(toggles)) $(id).onclick = () => { S.show[key] = !S.show[key]; $(id).classList.toggle('on', S.show[key]); savePrefs(); };
 $('ex').onchange = e => { S.ex = e.target.value; savePrefs(); start(); };
 $('sym').onchange = e => { S.sym = e.target.value; savePrefs(); start(); };
